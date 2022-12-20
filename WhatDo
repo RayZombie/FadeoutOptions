@@ -1,0 +1,265 @@
+let totalMessages = 0, messagesLimit = 0, nickColor = "user", removeSelector, addition;
+let animationIn = 'bounceIn';
+let animationOut = 'bounceOut';
+let hideAfter = 60;
+let hideCommands = "no";
+let ignoredUsers = [];
+let channels = {};
+let mainChannel;
+let showBadges;
+window.addEventListener('onEventReceived', function (obj) {
+    if (obj.detail.listener === "delete-message") {
+        const msgId = obj.detail.event.msgId;
+        $(`.message-row[data-msgid=${msgId}]`).remove();
+    } else if (obj.detail.listener === "delete-messages") {
+        const sender = obj.detail.event.userId;
+        $(`.message-row[data-sender=${sender}]`).remove();
+    }
+    if (obj.detail.listener !== "message") return;
+    let data = obj.detail.event.data;
+    if (data.text.startsWith("!") && hideCommands === "yes") return;
+    if (ignoredUsers.indexOf(data.nick) !== -1) return;
+    let message = attachEmotes(data);
+    let badges = "", badge;
+    if (data.channel === mainChannel) {
+
+        if (showBadges) {
+            data.badges.unshift({"type": "ExternalChannel", url: channels[mainChannel].avatar});
+        } else {
+            data.badges = [{"type": "ExternalChannel", url: channels[mainChannel].avatar}];
+        }
+    }
+    for (let i = 0; i < data.badges.length; i++) {
+        badge = data.badges[i];
+        badges += `<img alt="" src="${badge.url}" class="badge"> `;
+    }
+    let username = data.displayName + ":";
+    if (nickColor === "user") {
+        const color = data.displayColor !== "" ? data.displayColor : "#" + (md5(username).substr(26));
+        username = `<span style="color:${color}">${username}</span>`;
+    }
+    addMessage(username, badges, message, data.isAction, data.userId, data.msgId);
+});
+
+window.addEventListener('onWidgetLoad', function (obj) {
+        const fieldData = obj.detail.fieldData;
+        animationIn = fieldData.animationIn;
+        animationOut = fieldData.animationOut;
+        hideAfter = fieldData.hideAfter;
+        messagesLimit = fieldData.messagesLimit;
+        nickColor = fieldData.nickColor;
+        hideCommands = fieldData.hideCommands;
+        mainChannel = obj.detail.channel.username;
+        showBadges = fieldData.showBadges;
+        let clientOptions = {
+            connection: {
+                reconnect: true,
+                secure: true,
+            },
+            channels: fieldData.secondaryChannel.split(",")
+        };
+        fetch("https://api.streamelements.com/kappa/v2/channels/" + mainChannel).then((response => response.json())).then((details) => {
+
+            channels[mainChannel] = {"avatar": details.avatar};
+
+        });
+        // Grabbing channel details
+        for (let i in clientOptions.channels) {
+            fetch("https://api.streamelements.com/kappa/v2/channels/" + clientOptions.channels[i]).then((response => response.json())).then((details) => {
+                if (!details.error) {
+                    fetch("https://api.streamelements.com/kappa/v2/channels/" + details['_id'] + "/emotes").then((response => response.json())).then((emotes) => {
+                        channels[clientOptions.channels[i].replace("#", "")] = {
+                            "avatar": details.avatar,
+                            "emotes": {
+                                "bttvChannelEmotes": emotes.bttvChannelEmotes,
+                                "bttvGlobalEmotes": emotes.bttvGlobalEmotes,
+                                "ffzChannelEmotes": emotes.ffzChannelEmotes,
+                                "ffzGlobalEmotes": emotes.ffzGlobalEmotes
+                            }
+                        };
+                    });
+                }else{
+                    channels[clientOptions.channels[i].replace("#", "")] = JSON.parse(JSON.stringify(channels[mainChannel]));
+                }
+            })
+        }
+
+
+        const client = new TwitchJS.client(clientOptions);
+        client.on('message', function (channel, userstate, message) {
+            channel=channel.replace("#","");
+            let emotes = [], badges = [{"type": "ExternalChannel", url: channels[channel].avatar}];
+
+            //Attaching BTTV and FFZ emotes
+            for (let i in channels[channel]['emotes']) {
+                for (let emote in channels[channel]['emotes'][i]) {
+                    let re = new RegExp("\\b" + emote + "\\b", 'g');
+                    while ((match = re.exec(message)) != null) {
+                        let data = channels[channel]['emotes'][i][emote];
+                        if (typeof data.urls[3] ===undefined) data.urls[3]=data.urls[2];
+                        if (typeof data.urls[4] ===undefined) data.urls[4]=data.urls[2];
+                        let position=[match.index,match.index+emote.length]
+                        let toPush={
+
+                            "urls": data.urls,
+                            "start": position[0],
+                            "end": position[1],
+                            "id": data._id,
+                            "type": i,
+                            "name": emote
+                        };
+                        emotes.push(toPush);
+
+                    }
+
+                }
+            }
+            //Attaching Twitch emotes
+            for (let i in userstate.emotes) {
+
+                for (let j in userstate.emotes[i]) {
+                    let position = userstate.emotes[i][j].split("-");
+                    position[0]=parseInt(position[0]);
+                    position[1]=parseInt(position[1]);
+                    let emote = {
+                        "urls": {
+                            1: `https://static-cdn.jtvnw.net/emoticons/v1/${i}/1.0`,
+                            2: `https://static-cdn.jtvnw.net/emoticons/v1/${i}/2.0`,
+                            3: `https://static-cdn.jtvnw.net/emoticons/v1/${i}/3.0`,
+                            4: `https://static-cdn.jtvnw.net/emoticons/v1/${i}/4.0`
+                        },
+                        "start": position[0],
+                        "end": position[1],
+                        "id": i,
+                        "type": "twitch",
+                        "name": message.slice(position[0], position[1] + 1)
+                    };
+                    emotes.push(emote);
+                }
+
+            }
+
+            let eventData = {
+                detail: {
+                    "listener": "message",
+                    "event": {
+                        "data": {
+                            "channel": channel,
+                            "emotes": emotes,
+                            "badges": badges,
+                            "tags": userstate,
+                            "text": message,
+                            "displayName": userstate['display-name'],
+                            "displayColor": userstate['color'] ? userstate['color'] : "",
+                            "msgId": userstate['id'],
+                            "userId": userstate['user-id'],
+                            "nick": userstate['username']
+                        }
+                    }
+                }
+            };
+            // Dispatching message event with same structure as native StreamElements
+            let event = new CustomEvent('onEventReceived', eventData);
+            window.dispatchEvent(event);
+
+        });
+        client.connect();
+        if (fieldData.alignMessages === "block") {
+            addition = "prepend";
+            removeSelector = ".message-row:nth-child(n+" + (messagesLimit + 1) + ")"
+        } else {
+            addition = "append";
+            removeSelector = ".message-row:nth-last-child(n+" + (messagesLimit + 1) + ")"
+        }
+
+        ignoredUsers = fieldData.ignoredUsers.toLowerCase().replace(" ", "").split(",");
+    }
+);
+
+
+function attachEmotes(message) {
+    let text = html_encode(message.text);
+    let data = message.emotes;
+    return text
+        .replace(
+            /([^\s]*)/gi,
+            function (m, key) {
+                let result = data.filter(emote => {
+                    return html_encode(emote.name) === key
+                });
+                if (typeof result[0] !== "undefined") {
+                    let url = result[0]['urls'][2];
+                    return `<img alt="" src="${url}" class="emote"/>`;
+                } else return key;
+
+            }
+        );
+}
+
+function html_encode(e) {
+    return e.replace(/[<>"^]/g, function (e) {
+        return "&#" + e.charCodeAt(0) + ";";
+    });
+}
+
+function addMessage(username, badges, message, isAction, uid, msgId) {
+    totalMessages += 1;
+    let actionClass = "";
+    if (isAction) {
+        actionClass = "action";
+    }
+    const element = $.parseHTML(`
+    <div data-sender="${uid}" data-msgid="${msgId}" class="message-row {animationIn} animated" id="msg-${totalMessages}">
+        <div class="user-box ${actionClass}">${badges}${username}</div>
+        <div class="user-message ${actionClass}">${message}</div>
+    </div>`);
+    if (addition === "append") {
+        if (hideAfter !== 999) {
+            $(element).appendTo('.main-container').delay(hideAfter * 1000).queue(function () {
+                $(this).removeClass(animationIn).addClass(animationOut).delay(1000).queue(function () {
+                    $(this).remove()
+                }).dequeue();
+            });
+        } else {
+            $(element).appendTo('.main-container');
+        }
+    } else {
+        if (hideAfter !== 999) {
+            $(element).prependTo('.main-container').delay(hideAfter * 1000).queue(function () {
+                $(this).removeClass(animationIn).addClass(animationOut).delay(1000).queue(function () {
+                    $(this).remove()
+                }).dequeue();
+            });
+        } else {
+            $(element).prependTo('.main-container');
+        }
+    }
+
+    if (totalMessages > messagesLimit) {
+        removeRow();
+    }
+}
+
+function removeRow() {
+    if (!$(removeSelector).length) {
+        return;
+    }
+    if (animationOut !== "none" || !$(removeSelector).hasClass(animationOut)) {
+        if (hideAfter !== 999) {
+            $(removeSelector).dequeue();
+        } else {
+            $(removeSelector).addClass(animationOut).delay(1000).queue(function () {
+                $(this).remove().dequeue()
+            });
+
+        }
+        return;
+    }
+
+    $(removeSelector).animate({
+        height: 0,
+        opacity: 0
+    }, 'slow', function () {
+        $(removeSelector).remove();
+    });
+}
